@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rust 視覺化教學</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18",
+      "react/jsx-runtime": "https://esm.sh/react@18/jsx-runtime",
+      "react-dom/client": "https://esm.sh/react-dom@18/client",
+      "lucide-react": "https://esm.sh/lucide-react@0.469.0"
+    }
+  }
+  </script>
+  <script src="https://unpkg.com/@babel/standalone@7.27.1/babel.min.js"></script>
+</head>
+<body class="bg-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    import React, { useState } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import {
+      Play, StepForward, StepBack, RotateCcw,
+      AlertTriangle, CheckCircle,
+      Lock, Unlock, ShieldAlert,
+      Box, Share2, Activity, Layers, Database, ArrowRight
+    } from 'lucide-react';
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 模組一 (rust01.js)：Rust 借用檢查器與生命週期
+    // ─────────────────────────────────────────────────────────────────────────
+    const SCENARIOS_01 = [
+      {
+        id: 'invalid-borrow',
+        title: '情境一：懸空引用 (編譯失敗)',
+        description: '展示當引用的存活時間超過其指向的資料時，Rust 會如何阻擋編譯。',
+        code: [
+          "fn main() {",
+          "    let r;",
+          "    {",
+          "        let x = 5;",
+          "        r = &x;",
+          "    } // x 在此被丟棄",
+          "    println!(\"{}\", r);",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "程式開始執行。", memory: { outer: [], inner: null }, status: 'normal' },
+          { line: 1, message: "宣告變數 `r`。它的生命週期涵蓋整個 main 函式，但尚未被初始化。", memory: { outer: [{ name: 'r', val: '未初始化', state: 'active' }], inner: null }, status: 'normal' },
+          { line: 2, message: "開啟了一個新的內部作用域（Scope）。", memory: { outer: [{ name: 'r', val: '未初始化', state: 'active' }], inner: [] }, status: 'normal' },
+          { line: 3, message: "在內部作用域宣告 `x` 並賦值為 5。`x` 是這個數值的擁有者。", memory: { outer: [{ name: 'r', val: '未初始化', state: 'active' }], inner: [{ name: 'x', val: '5', state: 'active' }] }, status: 'normal' },
+          { line: 4, message: "借用發生！`r` 現在指向 `x`。Rust 的借用檢查器會記錄：r 的目標 (x) 必須活得比 r 還久。", memory: { outer: [{ name: 'r', val: '&x', state: 'active', pointsTo: 'x' }], inner: [{ name: 'x', val: '5', state: 'active' }] }, status: 'normal' },
+          { line: 5, message: "內部作用域結束。變數 `x` 被丟棄（Dropped）。此時 `r` 變成了懸空引用（指向無效記憶體）。", memory: { outer: [{ name: 'r', val: '&x', state: 'error', pointsTo: 'x' }], inner: [{ name: 'x', val: '已丟棄 (Dropped)', state: 'dropped' }] }, status: 'error', errorMsg: "`x` 不夠長壽 (x does not live long enough)" },
+          { line: 6, message: "編譯錯誤！嘗試使用無效的引用 `r`。借用檢查器在編譯階段就會擋下這段程式碼。", memory: { outer: [{ name: 'r', val: '&x', state: 'error', pointsTo: 'x' }], inner: [{ name: 'x', val: '已回收', state: 'dropped' }] }, status: 'error', errorMsg: "編譯失敗：borrowed value does not live long enough" }
+        ]
+      },
+      {
+        id: 'valid-borrow',
+        title: '情境二：合法的借用 (編譯成功)',
+        description: '展示資料的擁有者活得比引用還久的情境。',
+        code: [
+          "fn main() {",
+          "    let x = 5;",
+          "    let r = &x;",
+          "    println!(\"{}\", r);",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "程式開始執行。", memory: { outer: [], inner: null }, status: 'normal' },
+          { line: 1, message: "宣告變數 `x`，擁有數值 5。", memory: { outer: [{ name: 'x', val: '5', state: 'active' }], inner: null }, status: 'normal' },
+          { line: 2, message: "宣告引用 `r`，指向 `x`。因為它們在同一個作用域，`x` 會在 `r` 之後才被丟棄，這是安全的。", memory: { outer: [{ name: 'x', val: '5', state: 'active' }, { name: 'r', val: '&x', state: 'active', pointsTo: 'x' }], inner: null }, status: 'normal' },
+          { line: 3, message: "安全地印出 `r` 的值。此時 `x` 依然存活。", memory: { outer: [{ name: 'x', val: '5', state: 'active' }, { name: 'r', val: '&x', state: 'active', pointsTo: 'x' }], inner: null }, status: 'success' },
+          { line: 4, message: "程式結束，`r` 和 `x` 依序被安全地丟棄。", memory: { outer: [], inner: null }, status: 'success' }
+        ]
+      },
+      {
+        id: 'explicit-lifetime',
+        title: "情境三：顯式生命週期註記 'a",
+        description: "當函式回傳引用時，編譯器需要知道回傳的引用和哪個輸入參數有相同的生命週期。",
+        code: [
+          "fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {",
+          "    if x.len() > y.len() { x } else { y }",
+          "}",
+          "fn main() {",
+          "    let s1 = String::from(\"long\");",
+          "    let result;",
+          "    {",
+          "        let s2 = String::from(\"xyz\");",
+          "        result = longest(&s1, &s2);",
+          "    } // s2 被丟棄",
+          "    println!(\"{}\", result); // 錯誤！",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "標記 <'a> 告訴編譯器：回傳的字串引用，其生命週期將等於 x 和 y 兩者生命週期的「交集」（取較短的那個）。", memory: { outer: [], inner: null }, status: 'normal' },
+          { line: 4, message: "進入 main 函式。創建字串 `s1`。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}], inner: null }, status: 'normal' },
+          { line: 5, message: "宣告 `result` 準備接收最長的字串引用。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '未初始化', state: 'active'}], inner: null }, status: 'normal' },
+          { line: 6, message: "進入內部作用域。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '未初始化', state: 'active'}], inner: [] }, status: 'normal' },
+          { line: 7, message: "創建字串 `s2`。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '未初始化', state: 'active'}], inner: [{name: 's2', val: '"xyz"', state: 'active'}] }, status: 'normal' },
+          { line: 8, message: "呼叫 longest。根據 'a 規則，回傳值 result 的生命週期被限制為 s1 和 s2 兩者較短的那個，也就是 s2 的生命週期。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '&s1 或 &s2', state: 'active', pointsTo: 's2'}], inner: [{name: 's2', val: '"xyz"', state: 'active'}] }, status: 'normal' },
+          { line: 9, message: "內部作用域結束，`s2` 被丟棄。但 `result` 的生命週期 'a 已經和 `s2` 綁定了！", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '&s1 或 &s2', state: 'error', pointsTo: 's2'}], inner: [{name: 's2', val: '已丟棄', state: 'dropped'}] }, status: 'error', errorMsg: "`s2` does not live long enough" },
+          { line: 10, message: "嘗試印出 result 會導致編譯失敗，因為編譯器認為 result 可能指向已經死掉的 s2。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '懸空引用', state: 'error'}], inner: [{name: 's2', val: '已丟棄', state: 'dropped'}] }, status: 'error', errorMsg: "編譯失敗！" }
+        ]
+      }
+    ];
+
+    function BorrowChecker() {
+      const [activeScenarioIdx, setActiveScenarioIdx] = useState(0);
+      const [currentStep, setCurrentStep] = useState(0);
+
+      const scenario = SCENARIOS_01[activeScenarioIdx];
+      const stepData = scenario.steps[currentStep];
+
+      const handleNext = () => { if (currentStep < scenario.steps.length - 1) setCurrentStep(currentStep + 1); };
+      const handlePrev = () => { if (currentStep > 0) setCurrentStep(currentStep - 1); };
+      const handleReset = () => { setCurrentStep(0); };
+      const handleScenarioChange = (idx) => { setActiveScenarioIdx(idx); setCurrentStep(0); };
+
+      const renderVar = (v, idx) => (
+        <div key={idx} className={`p-3 rounded-md mb-2 flex items-center justify-between border-2 transition-all ${
+          v.state === 'active' ? 'bg-blue-50 border-blue-200 text-blue-800' :
+          v.state === 'error' ? 'bg-red-50 border-red-400 text-red-800 animate-pulse' :
+          'bg-gray-100 border-gray-300 text-gray-500 opacity-60'
+        }`}>
+          <div className="flex flex-col">
+            <span className="font-mono font-bold text-lg">{v.name}</span>
+            <span className="text-sm">{v.state === 'active' && !v.pointsTo ? '擁有人 (Owner)' : (v.pointsTo ? '引用 (Reference)' : '已丟棄')}</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            {v.pointsTo && (
+              <div className="flex items-center text-gray-400">
+                <span className="mr-1">指向</span>
+                <span className={`font-mono font-bold ${v.state === 'error' ? 'text-red-500 line-through' : 'text-blue-600'}`}>{v.pointsTo}</span>
+              </div>
+            )}
+            <div className={`px-3 py-1 rounded font-mono text-sm ${v.state === 'error' ? 'bg-red-200' : 'bg-white shadow-sm'}`}>{v.val}</div>
+          </div>
+        </div>
+      );
+
+      return (
+        <div className="min-h-screen bg-gray-50 p-4 md:p-8 font-sans text-gray-800">
+          <div className="max-w-5xl mx-auto space-y-6">
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+              <h1 className="text-3xl font-bold text-gray-900 mb-2">Rust 借用檢查器與生命週期</h1>
+              <p className="text-gray-600">透過視覺化單步執行，理解 Rust 是如何在編譯階段阻止懸空引用的。</p>
+              <div className="flex flex-wrap gap-2 mt-4">
+                {SCENARIOS_01.map((s, idx) => (
+                  <button key={s.id} onClick={() => handleScenarioChange(idx)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeScenarioIdx === idx ? 'bg-orange-600 text-white shadow-md' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                    {s.title}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-4 text-sm text-gray-500 bg-gray-50 p-3 rounded border border-gray-100">{scenario.description}</p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="bg-[#1e1e1e] rounded-xl shadow-sm overflow-hidden border border-gray-800 flex flex-col">
+                <div className="bg-[#2d2d2d] px-4 py-2 text-gray-300 text-sm font-mono flex items-center"><span>main.rs</span></div>
+                <div className="p-4 font-mono text-sm sm:text-base overflow-x-auto flex-1">
+                  {scenario.code.map((line, idx) => (
+                    <div key={idx} className={`flex px-2 py-1 rounded transition-colors ${stepData.line === idx ? 'bg-blue-900/50 border-l-4 border-blue-400' : 'border-l-4 border-transparent text-gray-400'}`}>
+                      <span className="w-8 select-none opacity-50 text-right mr-4">{idx + 1}</span>
+                      <span className={stepData.line === idx ? 'text-blue-100' : ''}>{line.replace(/ /g, "\u00A0")}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="bg-[#2d2d2d] p-4 flex items-center justify-between border-t border-gray-700">
+                  <div className="text-gray-400 text-sm">Step {currentStep + 1} / {scenario.steps.length}</div>
+                  <div className="flex space-x-2">
+                    <button onClick={handleReset} className="p-2 rounded hover:bg-gray-600 text-gray-300 transition-colors" title="重置"><RotateCcw size={20} /></button>
+                    <button onClick={handlePrev} disabled={currentStep === 0} className="p-2 rounded hover:bg-gray-600 text-gray-300 disabled:opacity-30 transition-colors" title="上一步"><StepBack size={20} /></button>
+                    <button onClick={handleNext} disabled={currentStep === scenario.steps.length - 1} className="p-2 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 transition-colors flex items-center space-x-1">
+                      <span>下一步</span><StepForward size={20} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
+                  <h2 className="font-semibold text-gray-700">編譯器視角 (Borrow Checker)</h2>
+                </div>
+                <div className="p-5 flex-1 overflow-y-auto">
+                  <div className={`p-4 rounded-lg mb-6 border ${stepData.status === 'error' ? 'bg-red-50 border-red-200 text-red-800' : stepData.status === 'success' ? 'bg-green-50 border-green-200 text-green-800' : 'bg-blue-50 border-blue-200 text-blue-800'}`}>
+                    <div className="flex items-start">
+                      {stepData.status === 'error' ? <AlertTriangle className="mr-2 mt-0.5 shrink-0" size={20} /> : stepData.status === 'success' ? <CheckCircle className="mr-2 mt-0.5 shrink-0" size={20} /> : <Play className="mr-2 mt-0.5 shrink-0" size={20} />}
+                      <div>
+                        <p className="font-medium">{stepData.message}</p>
+                        {stepData.errorMsg && <p className="mt-2 font-mono text-sm bg-red-100 p-2 rounded text-red-900 border border-red-200">{stepData.errorMsg}</p>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">作用域與記憶體狀態</h3>
+                    <div className="border-2 border-gray-300 rounded-lg p-4 relative">
+                      <div className="absolute -top-3 left-4 bg-white px-2 text-xs font-bold text-gray-500">Main 作用域 ('a)</div>
+                      {stepData.memory.outer.length === 0 && !stepData.memory.inner && <div className="text-gray-400 text-center py-4 text-sm">尚未分配變數</div>}
+                      {stepData.memory.outer.map((v, i) => renderVar(v, i))}
+                      {stepData.memory.inner !== null && (
+                        <div className="border-2 border-dashed border-gray-400 bg-gray-50 rounded-lg p-4 mt-4 relative">
+                          <div className="absolute -top-3 left-4 bg-gray-50 px-2 text-xs font-bold text-gray-500">內部作用域 ('b)</div>
+                          {stepData.memory.inner.length === 0 && <div className="text-gray-400 text-center py-2 text-sm">無變數</div>}
+                          {stepData.memory.inner.map((v, i) => renderVar(v, i))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 模組二 (rust02.js)：借用檢查器進階視覺化
+    // ─────────────────────────────────────────────────────────────────────────
+    const SCENARIOS_02 = [
+      {
+        id: 'struct-lifetime',
+        title: '進階一：結構體中的生命週期',
+        description: '當 Struct 儲存引用時，必須宣告生命週期參數，告訴編譯器「這個 Struct 實例的存活時間，絕對不能超過它所持有的引用」。',
+        code: [
+          "struct Excerpt<'a> {",
+          "    part: &'a str,",
+          "}",
+          "fn main() {",
+          "    let i;",
+          "    {",
+          "        let text = String::from(\"Rust\");",
+          "        i = Excerpt { part: &text };",
+          "    } // text 在此被丟棄",
+          "    println!(\"{}\", i.part);",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "宣告 Struct。<'a> 標示了這個結構體持有引用的生命週期。", memory: { outer: [], inner: null } },
+          { line: 4, message: "宣告變數 `i`，準備用來存放 Excerpt 實例。", memory: { outer: [{ name: 'i', val: '未初始化', state: 'active', type: 'struct' }], inner: null } },
+          { line: 5, message: "開啟內部作用域。", memory: { outer: [{ name: 'i', val: '未初始化', state: 'active', type: 'struct' }], inner: [] } },
+          { line: 6, message: "創建字串 `text`。", memory: { outer: [{ name: 'i', val: '未初始化', state: 'active', type: 'struct' }], inner: [{ name: 'text', val: '"Rust"', state: 'active', type: 'owner' }] } },
+          { line: 7, message: "創建 Excerpt 實例。此時 i.part 借用了 text。編譯器記錄：i 的生命週期被限制在 text 的生命週期內。", memory: { outer: [{ name: 'i', val: 'Excerpt { part: &text }', state: 'active', type: 'struct', pointsTo: 'text' }], inner: [{ name: 'text', val: '"Rust"', state: 'active', type: 'owner', locks: { read: 1, write: 0 } }] } },
+          { line: 8, message: "內部作用域結束，`text` 被丟棄。但 `i` 仍然存活，導致 `i` 內部包含了一個懸空引用！", status: 'error', errorMsg: "`text` 不夠長壽", memory: { outer: [{ name: 'i', val: 'Excerpt { part: 懸空引用 }', state: 'error', type: 'struct', pointsTo: 'text' }], inner: [{ name: 'text', val: '已丟棄', state: 'dropped', type: 'owner' }] } },
+          { line: 9, message: "編譯失敗！嘗試存取無效的引用 `i.part`。", status: 'error', memory: { outer: [{ name: 'i', val: 'Excerpt { part: 懸空引用 }', state: 'error', type: 'struct', pointsTo: 'text' }], inner: [{ name: 'text', val: '已回收', state: 'dropped', type: 'owner' }] } }
+        ]
+      },
+      {
+        id: 'borrow-conflict',
+        title: '進階二：借用衝突 (讀寫互斥)',
+        description: 'Rust 借用規則：「在任何給定的時間點，你可以擁有任意數量的不可變引用(&)，或剛好一個可變引用(&mut)，但不能同時擁有兩者」。這被稱為 Aliasing XOR Mutation。',
+        code: [
+          "fn main() {",
+          "    let mut s = String::from(\"hello\");",
+          "    let r1 = &s; // 不可變借用",
+          "    let r2 = &s; // 不可變借用",
+          "    let r3 = &mut s; // 可變借用 (衝突！)",
+          "    println!(\"{}, {}, {}\", r1, r2, r3);",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "程式開始。", memory: { outer: [], inner: null } },
+          { line: 1, message: "宣告可變變數 `s`，擁有字串的擁有權。", memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 0, write: 0 }, isMut: true }], inner: null } },
+          { line: 2, message: "宣告不可變引用 `r1`。`s` 被加上了 1 個「讀取鎖」。", memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 1, write: 0 }, isMut: true }, { name: 'r1', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }], inner: null } },
+          { line: 3, message: "宣告不可變引用 `r2`。多個讀取是安全的，`s` 現在有 2 個「讀取鎖」。", memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 2, write: 0 }, isMut: true }, { name: 'r1', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }, { name: 'r2', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }], inner: null } },
+          { line: 4, message: "宣告可變引用 `r3` 嘗試獲取「寫入鎖」。失敗！因為 `s` 身上還有未釋放的讀取鎖（r1, r2 稍後還會用到）。", status: 'error', errorMsg: "cannot borrow `s` as mutable because it is also borrowed as immutable", memory: { outer: [{ name: 's', val: '"hello"', state: 'error', type: 'owner', locks: { read: 2, write: '拒絕' }, isMut: true }, { name: 'r1', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }, { name: 'r2', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }, { name: 'r3', val: '&mut s (失敗)', state: 'error', type: 'mut_ref', pointsTo: 's' }], inner: null } },
+          { line: 5, message: "編譯階段被借用檢查器擋下。", status: 'error', memory: { outer: [{ name: 's', val: '"hello"', state: 'error', type: 'owner', locks: { read: 2, write: '拒絕' }, isMut: true }, { name: 'r1', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }, { name: 'r2', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }, { name: 'r3', val: '&mut s', state: 'error', type: 'mut_ref', pointsTo: 's' }], inner: null } }
+        ]
+      },
+      {
+        id: 'nll',
+        title: '進階三：非詞法生命週期 (NLL)',
+        description: '在現代 Rust 中，引用的生命週期不再死板地跟隨大括號結束。如果一個引用「最後一次被使用」的地方提早結束，編譯器會提早釋放它的鎖。',
+        code: [
+          "fn main() {",
+          "    let mut s = String::from(\"hello\");",
+          "    let r1 = &s; // 不可變借用",
+          "    println!(\"{}\", r1);",
+          "    // --- NLL: r1 之後再也沒被使用 ---",
+          "    let r2 = &mut s; // 可變借用 (成功！)",
+          "    r2.push_str(\" world\");",
+          "    println!(\"{}\", r2);",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "程式開始。", memory: { outer: [], inner: null } },
+          { line: 1, message: "宣告擁有者 `s`。", memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 0, write: 0 }, isMut: true }], inner: null } },
+          { line: 2, message: "宣告不可變引用 `r1`。`s` 獲得 1 個讀取鎖。", memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 1, write: 0 }, isMut: true }, { name: 'r1', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }], inner: null } },
+          { line: 3, message: "使用 `r1` 印出值。這是 `r1` 最後一次被使用。", memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 1, write: 0 }, isMut: true }, { name: 'r1', val: '&s', state: 'active', type: 'immut_ref', pointsTo: 's' }], inner: null } },
+          { line: 4, message: "魔法發生 (NLL)：編譯器分析發現 r1 往後再也不會被用到了！因此提早結束 r1 的生命週期，並釋放 s 的讀取鎖。", status: 'success', memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 0, write: 0 }, isMut: true }, { name: 'r1', val: '提前結束 (NLL)', state: 'dropped', type: 'immut_ref' }], inner: null } },
+          { line: 5, message: "宣告可變引用 `r2`。因為 s 的讀取鎖已經被清空，現在可以安全地獲取「寫入鎖」！", memory: { outer: [{ name: 's', val: '"hello"', state: 'active', type: 'owner', locks: { read: 0, write: 1 }, isMut: true }, { name: 'r1', val: '提前結束 (NLL)', state: 'dropped', type: 'immut_ref' }, { name: 'r2', val: '&mut s', state: 'active', type: 'mut_ref', pointsTo: 's' }], inner: null } },
+          { line: 6, message: "透過可變引用 `r2` 修改字串內容。", memory: { outer: [{ name: 's', val: '"hello world"', state: 'active', type: 'owner', locks: { read: 0, write: 1 }, isMut: true }, { name: 'r1', val: '提前結束 (NLL)', state: 'dropped', type: 'immut_ref' }, { name: 'r2', val: '&mut s', state: 'active', type: 'mut_ref', pointsTo: 's' }], inner: null } },
+          { line: 7, message: "編譯成功並執行完畢。", status: 'success', memory: { outer: [{ name: 's', val: '"hello world"', state: 'active', type: 'owner', locks: { read: 0, write: 1 }, isMut: true }, { name: 'r1', val: '提前結束', state: 'dropped', type: 'immut_ref' }, { name: 'r2', val: '&mut s', state: 'active', type: 'mut_ref', pointsTo: 's' }], inner: null } }
+        ]
+      }
+    ];
+
+    function AdvancedRustLifetimes() {
+      const [activeScenarioIdx, setActiveScenarioIdx] = useState(0);
+      const [currentStep, setCurrentStep] = useState(0);
+
+      const scenario = SCENARIOS_02[activeScenarioIdx];
+      const stepData = scenario.steps[currentStep];
+
+      const handleNext = () => { if (currentStep < scenario.steps.length - 1) setCurrentStep(currentStep + 1); };
+      const handlePrev = () => { if (currentStep > 0) setCurrentStep(currentStep - 1); };
+      const handleReset = () => { setCurrentStep(0); };
+      const handleScenarioChange = (idx) => { setActiveScenarioIdx(idx); setCurrentStep(0); };
+
+      const renderVar = (v, idx) => {
+        const isError = v.state === 'error';
+        const isDropped = v.state === 'dropped';
+        const isMutRef = v.type === 'mut_ref';
+        const isOwner = v.type === 'owner';
+        const isStruct = v.type === 'struct';
+        let bgClass = 'bg-gray-100 border-gray-300 text-gray-500';
+        if (isError) bgClass = 'bg-red-50 border-red-400 text-red-900 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.3)]';
+        else if (!isDropped) {
+          if (isMutRef) bgClass = 'bg-amber-50 border-amber-400 text-amber-900';
+          else if (isStruct) bgClass = 'bg-purple-50 border-purple-300 text-purple-900';
+          else bgClass = 'bg-blue-50 border-blue-300 text-blue-900';
+        }
+        return (
+          <div key={idx} className={`p-4 rounded-lg mb-3 flex flex-col border-2 transition-all duration-300 ${bgClass}`}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center space-x-2">
+                <span className="font-mono font-bold text-xl">{v.name}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full ${isError ? 'bg-red-200' : 'bg-black/10'}`}>
+                  {isOwner ? (v.isMut ? '可變擁有者' : '擁有者') : isStruct ? 'Struct 實例' : isMutRef ? '可變借用 (&mut)' : '不可變借用 (&)'}
+                </span>
+              </div>
+              {isOwner && v.locks && !isDropped && (
+                <div className="flex space-x-3 bg-white px-3 py-1.5 rounded-md border shadow-sm">
+                  <div className="flex items-center space-x-1" title="讀取鎖 (Shared Locks)">
+                    <Unlock size={14} className={v.locks.read > 0 ? "text-blue-600" : "text-gray-300"} />
+                    <span className={`font-mono text-sm ${v.locks.read > 0 ? "text-blue-700 font-bold" : "text-gray-400"}`}>{v.locks.read}</span>
+                  </div>
+                  <div className="w-px bg-gray-200"></div>
+                  <div className="flex items-center space-x-1" title="寫入鎖 (Exclusive Lock)">
+                    <Lock size={14} className={v.locks.write === 1 ? "text-amber-600" : v.locks.write === '拒絕' ? "text-red-500" : "text-gray-300"} />
+                    <span className={`font-mono text-sm ${v.locks.write === 1 ? "text-amber-700 font-bold" : v.locks.write === '拒絕' ? "text-red-600 font-bold" : "text-gray-400"}`}>{v.locks.write}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between mt-1">
+              <div className={`font-mono text-sm py-1.5 px-3 rounded-md border ${isError ? 'bg-red-100 border-red-300' : isDropped ? 'bg-gray-200 border-transparent opacity-60' : 'bg-white/80 border-black/10'}`}>
+                {isStruct ? <Box size={14} className="inline mr-2 text-purple-600"/> : null}
+                {v.val}
+              </div>
+              {v.pointsTo && !isDropped && (
+                <div className="mt-2 sm:mt-0 flex items-center space-x-2 text-sm bg-white/50 px-2 py-1 rounded">
+                  <span className="text-black/50">指向 →</span>
+                  <span className={`font-mono font-bold ${isError ? 'text-red-600 line-through' : isMutRef ? 'text-amber-700' : 'text-blue-700'}`}>{v.pointsTo}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-100 p-4 md:p-8 font-sans text-gray-800">
+          <div className="max-w-6xl mx-auto space-y-6">
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none"><ShieldAlert size={120} /></div>
+              <h1 className="text-3xl font-bold text-slate-800 mb-2">Rust 借用檢查器 <span className="text-orange-600">進階視覺化</span></h1>
+              <p className="text-slate-600 max-w-3xl">深入探討 Struct 生命週期、讀寫鎖互斥（Aliasing XOR Mutation）以及非詞法生命週期（NLL）的底層運作邏輯。</p>
+              <div className="flex flex-wrap gap-2 mt-6">
+                {SCENARIOS_02.map((s, idx) => (
+                  <button key={s.id} onClick={() => handleScenarioChange(idx)}
+                    className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-all ${activeScenarioIdx === idx ? 'bg-slate-800 text-white shadow-md ring-2 ring-orange-500 ring-offset-2' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-200'}`}>
+                    {s.title}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-5 text-sm text-slate-700 bg-orange-50 p-4 rounded-xl border border-orange-100 flex items-start">
+                <Lock className="shrink-0 mr-3 text-orange-400 mt-0.5" size={18} />
+                <p className="leading-relaxed">{scenario.description}</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="bg-[#0f172a] rounded-2xl shadow-lg overflow-hidden flex flex-col border border-slate-800">
+                <div className="bg-[#1e293b] px-4 py-3 text-slate-300 text-sm font-mono flex items-center shadow-sm">
+                  <div className="w-3 h-3 rounded-full bg-red-500 mr-2"></div>
+                  <div className="w-3 h-3 rounded-full bg-yellow-500 mr-2"></div>
+                  <div className="w-3 h-3 rounded-full bg-green-500 mr-4"></div>
+                  <span>advanced_lifetimes.rs</span>
+                </div>
+                <div className="p-5 font-mono text-sm sm:text-base overflow-x-auto flex-1 leading-loose">
+                  {scenario.code.map((line, idx) => (
+                    <div key={idx} className={`flex px-2 py-0.5 rounded transition-colors ${stepData.line === idx ? 'bg-blue-900/40 border-l-4 border-blue-400' : 'border-l-4 border-transparent text-slate-400'}`}>
+                      <span className="w-8 select-none opacity-40 text-right mr-4">{idx + 1}</span>
+                      <span className={stepData.line === idx ? 'text-blue-50 font-semibold' : ''}>{line.replace(/ /g, "\u00A0")}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="bg-[#1e293b] p-4 flex items-center justify-between border-t border-slate-700">
+                  <div className="text-slate-400 text-sm font-mono bg-black/20 px-3 py-1 rounded-full">Step {currentStep + 1} / {scenario.steps.length}</div>
+                  <div className="flex space-x-3">
+                    <button onClick={handleReset} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300 transition-colors bg-slate-800" title="重新開始"><RotateCcw size={20} /></button>
+                    <button onClick={handlePrev} disabled={currentStep === 0} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300 disabled:opacity-30 transition-colors bg-slate-800" title="上一步"><StepBack size={20} /></button>
+                    <button onClick={handleNext} disabled={currentStep === scenario.steps.length - 1} className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 transition-colors flex items-center space-x-2 font-medium shadow-md">
+                      <span>下一步</span><StepForward size={20} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl shadow-lg border border-slate-200 flex flex-col overflow-hidden">
+                <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex justify-between items-center">
+                  <h2 className="font-bold text-slate-800">編譯器視角 (Borrow Checker)</h2>
+                  <div className="flex items-center space-x-4 text-xs text-slate-500 font-medium">
+                    <span className="flex items-center"><Unlock size={12} className="mr-1 text-blue-500"/>讀取鎖(多個)</span>
+                    <span className="flex items-center"><Lock size={12} className="mr-1 text-amber-500"/>寫入鎖(唯一)</span>
+                  </div>
+                </div>
+                <div className="p-5 flex-1 overflow-y-auto bg-slate-50/50">
+                  <div className={`p-4 rounded-xl mb-6 border shadow-sm transition-all duration-300 ${stepData.status === 'error' ? 'bg-red-50 border-red-200 text-red-800' : stepData.status === 'success' ? 'bg-green-50 border-green-200 text-green-800' : 'bg-blue-50 border-blue-200 text-blue-900'}`}>
+                    <div className="flex items-start">
+                      {stepData.status === 'error' ? <AlertTriangle className="mr-3 mt-0.5 shrink-0" size={24} /> : stepData.status === 'success' ? <CheckCircle className="mr-3 mt-0.5 shrink-0" size={24} /> : <Play className="mr-3 mt-0.5 shrink-0 text-blue-500" size={24} />}
+                      <div>
+                        <p className="font-medium text-base leading-relaxed">{stepData.message}</p>
+                        {stepData.errorMsg && <p className="mt-3 font-mono text-sm bg-red-100 p-3 rounded-lg text-red-900 border border-red-200 font-semibold shadow-inner">{`> ${stepData.errorMsg}`}</p>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest pl-2 mb-2">記憶體與作用域</h3>
+                    <div className="border-2 border-slate-300 rounded-xl p-5 relative bg-white shadow-sm">
+                      <div className="absolute -top-3 left-4 bg-white px-3 py-0.5 rounded-full border border-slate-200 text-xs font-bold text-slate-600 shadow-sm">Main 作用域 ('a)</div>
+                      {stepData.memory.outer.length === 0 && !stepData.memory.inner && <div className="text-slate-400 text-center py-6 text-sm font-medium">尚未分配變數</div>}
+                      {stepData.memory.outer.map((v, i) => renderVar(v, i))}
+                      {stepData.memory.inner !== null && (
+                        <div className="border-2 border-dashed border-slate-400 bg-slate-50 rounded-xl p-5 mt-6 relative">
+                          <div className="absolute -top-3 left-4 bg-slate-50 px-3 py-0.5 rounded-full border border-dashed border-slate-400 text-xs font-bold text-slate-600">內部作用域 ('b)</div>
+                          {stepData.memory.inner.length === 0 && <div className="text-slate-400 text-center py-4 text-sm font-medium">無變數</div>}
+                          {stepData.memory.inner.map((v, i) => renderVar(v, i))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 模組三 (rust03.js)：Rust 智慧指標
+    // ─────────────────────────────────────────────────────────────────────────
+    const SCENARIOS_03 = [
+      {
+        id: 'box',
+        title: 'Box<T>：單一擁有權的堆積分配',
+        description: 'Box 是最簡單的智慧指標。它將資料從 Stack (堆疊) 搬到 Heap (堆積)，並在 Stack 上留下一個指標。它依然遵守「單一擁有權」規則，可以發生 Move (轉移)。',
+        code: [
+          "fn main() {",
+          "    // b 被分配在 Stack，但它的資料 (5) 在 Heap",
+          "    let b = Box::new(5);",
+          "    ",
+          "    // 擁有權轉移 (Move) 給 c",
+          "    let c = b;",
+          "    ",
+          "    // println!(\"{}\", b); // 錯誤！b 已失效",
+          "} // c 被丟棄，Heap 上的資料隨之釋放"
+        ],
+        steps: [
+          { line: 0, message: "程式開始。", stack: [], heap: [] },
+          { line: 2, message: "呼叫 Box::new(5)。在 Heap 上分配記憶體存入 5，並在 Stack 建立指標 `b` 指向它。", stack: [{ name: 'b', type: 'Box', pointsTo: 'heap_1', valid: true }], heap: [{ id: 'heap_1', val: '5', refs: 1, type: 'data' }] },
+          { line: 5, message: "將 b 賦值給 c。因為 Box 遵守擁有權規則，這會發生 Move (轉移)。b 失效，改由 c 掌管 Heap 上的資料。", stack: [{ name: 'b', type: 'Box', pointsTo: 'heap_1', valid: false }, { name: 'c', type: 'Box', pointsTo: 'heap_1', valid: true }], heap: [{ id: 'heap_1', val: '5', refs: 1, type: 'data' }] },
+          { line: 7, message: "此時如果嘗試使用 b 會引發編譯錯誤，因為它的擁有權已經被轉移了。", stack: [{ name: 'b', type: 'Box', pointsTo: 'heap_1', valid: false }, { name: 'c', type: 'Box', pointsTo: 'heap_1', valid: true }], heap: [{ id: 'heap_1', val: '5', refs: 1, type: 'data' }] },
+          { line: 8, message: "離開作用域，變數 c 被丟棄 (Drop)。因為 c 是 Heap 資料的唯一擁有者，Heap 上的記憶體也被安全釋放。", stack: [], heap: [] }
+        ]
+      },
+      {
+        id: 'rc',
+        title: 'Rc<T>：單執行緒的多重擁有權',
+        description: 'Rc (Reference Counted) 允許一個資料有多個擁有者。它會在 Heap 上維護一個「引用計數 (Strong Count)」。每 Clone 一次計數加 1，Drop 一次減 1。歸零時才釋放記憶體。',
+        code: [
+          "use std::rc::Rc;",
+          "fn main() {",
+          "    let r1 = Rc::new(String::from(\"共用資料\"));",
+          "    let r2;",
+          "    {",
+          "        // 增加引用計數，不會複製底層資料",
+          "        r2 = Rc::clone(&r1);",
+          "    } // r2 離開作用域，計數減 1",
+          "} // r1 離開作用域，計數歸零，釋放記憶體"
+        ],
+        steps: [
+          { line: 1, message: "程式開始。", stack: [], heap: [] },
+          { line: 2, message: "建立 Rc。Heap 上除了存放資料，還多了一個 Strong Count (目前為 1)。", stack: [{ name: 'r1', type: 'Rc', pointsTo: 'heap_rc', valid: true }], heap: [{ id: 'heap_rc', val: '"共用資料"', refs: 1, type: 'rc_data' }] },
+          { line: 3, message: "宣告變數 r2。", stack: [{ name: 'r1', type: 'Rc', pointsTo: 'heap_rc', valid: true }, { name: 'r2', type: 'Rc', pointsTo: null, valid: false }], heap: [{ id: 'heap_rc', val: '"共用資料"', refs: 1, type: 'rc_data' }] },
+          { line: 6, message: "呼叫 Rc::clone(&r1)。這不會複製字串本身！它只是讓 r2 也指向 Heap，並將 Heap 上的 Strong Count 加 1 變成 2。", stack: [{ name: 'r1', type: 'Rc', pointsTo: 'heap_rc', valid: true }, { name: 'r2', type: 'Rc', pointsTo: 'heap_rc', valid: true, isInner: true }], heap: [{ id: 'heap_rc', val: '"共用資料"', refs: 2, type: 'rc_data' }] },
+          { line: 7, message: "內部作用域結束，r2 被丟棄。Heap 上的 Strong Count 減 1 變回 1。資料沒有被釋放，因為 r1 還在用！", stack: [{ name: 'r1', type: 'Rc', pointsTo: 'heap_rc', valid: true }], heap: [{ id: 'heap_rc', val: '"共用資料"', refs: 1, type: 'rc_data' }] },
+          { line: 8, message: "main 結束，r1 被丟棄。Strong Count 減 1 變成 0。這時 Rc 知道已經沒有人需要它了，安全釋放 Heap 記憶體。", stack: [], heap: [] }
+        ]
+      },
+      {
+        id: 'arc',
+        title: 'Arc<T>：多執行緒的安全共享',
+        description: 'Arc (Atomic Reference Counted) 和 Rc 幾乎一樣，差別在於它的計數器使用了「原子操作 (Atomic)」，因此可以安全地跨越執行緒 (Thread) 分享，不會有 Data Race。',
+        code: [
+          "use std::sync::Arc;",
+          "use std::thread;",
+          "fn main() {",
+          "    let arc1 = Arc::new(vec![1, 2, 3]);",
+          "    let arc2 = Arc::clone(&arc1);",
+          "    ",
+          "    // 啟動新執行緒，並將 arc2 的擁有權 Move 進去",
+          "    let handle = thread::spawn(move || {",
+          "        println!(\"{:?}\", arc2);",
+          "    }); // 執行緒結束，arc2 被丟棄，計數減 1",
+          "    ",
+          "    handle.join().unwrap();",
+          "} // main 結束，arc1 被丟棄，計數歸零，釋放"
+        ],
+        steps: [
+          { line: 2, message: "程式開始。", stack: [], heap: [] },
+          { line: 3, message: "建立 Arc。在 Heap 上分配陣列，並建立具有 Atomic 特性的 Strong Count (目前為 1)。", stack: [{ name: 'arc1', type: 'Arc', pointsTo: 'heap_arc', valid: true, thread: 'main' }], heap: [{ id: 'heap_arc', val: '[1, 2, 3]', refs: 1, type: 'arc_data', isAtomic: true }] },
+          { line: 4, message: "Clone Arc。Strong Count 安全地增加到 2。", stack: [{ name: 'arc1', type: 'Arc', pointsTo: 'heap_arc', valid: true, thread: 'main' }, { name: 'arc2', type: 'Arc', pointsTo: 'heap_arc', valid: true, thread: 'main' }], heap: [{ id: 'heap_arc', val: '[1, 2, 3]', refs: 2, type: 'arc_data', isAtomic: true }] },
+          { line: 7, message: "啟動新執行緒！arc2 被 Move 到 Worker 執行緒的 Stack 中。跨執行緒共享達成！", stack: [{ name: 'arc1', type: 'Arc', pointsTo: 'heap_arc', valid: true, thread: 'main' }, { name: 'arc2', type: 'Arc', pointsTo: 'heap_arc', valid: true, thread: 'worker' }], heap: [{ id: 'heap_arc', val: '[1, 2, 3]', refs: 2, type: 'arc_data', isAtomic: true }] },
+          { line: 9, message: "Worker 執行緒執行完畢。其 Stack 上的 arc2 被丟棄，Atomic Strong Count 安全減至 1。", stack: [{ name: 'arc1', type: 'Arc', pointsTo: 'heap_arc', valid: true, thread: 'main' }], heap: [{ id: 'heap_arc', val: '[1, 2, 3]', refs: 1, type: 'arc_data', isAtomic: true }] },
+          { line: 12, message: "Main 執行緒結束。arc1 被丟棄，Atomic Strong Count 歸零，Heap 上的記憶體被釋放。", stack: [], heap: [] }
+        ]
+      }
+    ];
+
+    function RustSmartPointers() {
+      const [activeScenarioIdx, setActiveScenarioIdx] = useState(0);
+      const [currentStep, setCurrentStep] = useState(0);
+
+      const scenario = SCENARIOS_03[activeScenarioIdx];
+      const stepData = scenario.steps[currentStep];
+
+      const handleNext = () => { if (currentStep < scenario.steps.length - 1) setCurrentStep(currentStep + 1); };
+      const handlePrev = () => { if (currentStep > 0) setCurrentStep(currentStep - 1); };
+      const handleReset = () => { setCurrentStep(0); };
+      const handleScenarioChange = (idx) => { setActiveScenarioIdx(idx); setCurrentStep(0); };
+
+      const getIcon = (type) => {
+        switch(type) {
+          case 'Box': return <Box size={16} className="text-amber-600" />;
+          case 'Rc': return <Share2 size={16} className="text-blue-600" />;
+          case 'Arc': return <Activity size={16} className="text-purple-600" />;
+          default: return null;
+        }
+      };
+
+      return (
+        <div className="min-h-screen bg-[#f8fafc] p-4 md:p-8 font-sans text-slate-800">
+          <div className="max-w-6xl mx-auto space-y-6">
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+              <h1 className="text-3xl font-bold text-slate-800 mb-2 flex items-center">
+                Rust 智慧指標
+                <span className="ml-3 px-3 py-1 bg-amber-100 text-amber-800 text-sm rounded-full">Box</span>
+                <span className="ml-2 px-3 py-1 bg-blue-100 text-blue-800 text-sm rounded-full">Rc</span>
+                <span className="ml-2 px-3 py-1 bg-purple-100 text-purple-800 text-sm rounded-full">Arc</span>
+              </h1>
+              <p className="text-slate-600 max-w-4xl mt-2">當標準的生命週期與單一擁有權無法滿足需求時，我們可以將資料放到 Heap 上，並透過智慧指標來管理它們的存活時間。</p>
+              <div className="flex flex-wrap gap-2 mt-6">
+                {SCENARIOS_03.map((s, idx) => (
+                  <button key={s.id} onClick={() => handleScenarioChange(idx)}
+                    className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-all ${activeScenarioIdx === idx ? 'bg-slate-800 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-200'}`}>
+                    {s.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-start">
+              <Play className="mr-3 mt-1 shrink-0 text-emerald-500 fill-emerald-100" size={24} />
+              <p className="text-lg font-medium text-slate-700 leading-relaxed">{stepData.message}</p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-1 bg-[#0f172a] rounded-2xl shadow-lg overflow-hidden flex flex-col border border-slate-800">
+                <div className="bg-[#1e293b] px-4 py-3 text-slate-300 text-sm font-mono flex items-center"><span>main.rs</span></div>
+                <div className="p-4 font-mono text-sm overflow-x-auto flex-1 leading-loose">
+                  {scenario.code.map((line, idx) => (
+                    <div key={idx} className={`flex px-2 py-0.5 rounded transition-colors ${stepData.line === idx ? 'bg-blue-900/50 border-l-4 border-blue-400' : 'border-l-4 border-transparent text-slate-400'}`}>
+                      <span className="w-6 select-none opacity-40 text-right mr-3">{idx + 1}</span>
+                      <span className={stepData.line === idx ? 'text-blue-50' : ''}>{line.replace(/ /g, "\u00A0")}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="bg-[#1e293b] p-4 flex justify-between border-t border-slate-700">
+                  <button onClick={handlePrev} disabled={currentStep === 0} className="p-2 rounded-lg bg-slate-700 text-white disabled:opacity-30 transition-colors"><StepBack size={20} /></button>
+                  <button onClick={handleReset} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300 transition-colors" title="重新開始"><RotateCcw size={20} /></button>
+                  <button onClick={handleNext} disabled={currentStep === scenario.steps.length - 1} className="px-6 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50 transition-colors flex items-center space-x-2 font-bold shadow-md">
+                    <span>下一步</span><StepForward size={20} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+                  <div className="bg-indigo-50 px-4 py-3 border-b border-indigo-100 flex items-center">
+                    <Layers className="text-indigo-600 mr-2" size={18} />
+                    <h2 className="font-bold text-indigo-900">Stack (堆疊)</h2>
+                    <span className="ml-auto text-xs text-indigo-500 bg-indigo-100 px-2 py-1 rounded-full">指標儲存區</span>
+                  </div>
+                  <div className="p-4 flex-1 bg-slate-50 relative">
+                    {stepData.stack.length === 0 ? (
+                      <div className="flex h-full items-center justify-center text-slate-400 text-sm">Stack 為空</div>
+                    ) : (
+                      <div className="space-y-3">
+                        {stepData.stack.map((item, i) => (
+                          <div key={i} className={`p-3 rounded-xl border-2 transition-all ${!item.valid ? 'bg-slate-200 border-slate-300 opacity-50' : item.thread === 'worker' ? 'bg-teal-50 border-teal-300' : item.isInner ? 'bg-indigo-50 border-indigo-300 ml-6 relative' : 'bg-white border-indigo-300 shadow-sm'}`}>
+                            {item.isInner && <div className="absolute -left-6 top-1/2 w-4 h-px bg-slate-400"></div>}
+                            <div className="flex justify-between items-center mb-1">
+                              <span className={`font-mono font-bold text-lg ${!item.valid ? 'text-slate-500 line-through' : 'text-slate-800'}`}>{item.name}</span>
+                              {item.thread && <span className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold ${item.thread === 'main' ? 'bg-blue-100 text-blue-700' : 'bg-teal-500 text-white'}`}>{item.thread} Thread</span>}
+                            </div>
+                            <div className="flex items-center text-sm">
+                              <div className="flex items-center space-x-1 mr-3 bg-white/60 px-2 py-0.5 rounded border border-black/5">
+                                {getIcon(item.type)}
+                                <span className="font-semibold text-slate-600">{item.type} 指標</span>
+                              </div>
+                              {item.pointsTo && item.valid && <div className="flex items-center text-indigo-600"><ArrowRight size={14} className="mr-1" /><span className="font-mono text-xs">指向 Heap</span></div>}
+                              {!item.valid && <span className="text-xs text-red-500 font-bold ml-2">已轉移/失效</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+                  <div className="bg-emerald-50 px-4 py-3 border-b border-emerald-100 flex items-center">
+                    <Database className="text-emerald-600 mr-2" size={18} />
+                    <h2 className="font-bold text-emerald-900">Heap (堆積)</h2>
+                    <span className="ml-auto text-xs text-emerald-500 bg-emerald-100 px-2 py-1 rounded-full">實際資料區</span>
+                  </div>
+                  <div className="p-4 flex-1 bg-slate-50">
+                    {stepData.heap.length === 0 ? (
+                      <div className="flex h-full items-center justify-center text-slate-400 text-sm">Heap 為空</div>
+                    ) : (
+                      <div className="space-y-4 h-full flex flex-col justify-center">
+                        {stepData.heap.map((item, i) => (
+                          <div key={i} className={`p-4 rounded-xl border-2 shadow-sm ${item.type === 'rc_data' ? 'bg-blue-50 border-blue-300' : item.type === 'arc_data' ? 'bg-purple-50 border-purple-300' : 'bg-amber-50 border-amber-300'}`}>
+                            {(item.type === 'rc_data' || item.type === 'arc_data') && (
+                              <div className="flex justify-between items-center mb-3 pb-3 border-b border-black/10">
+                                <div className="flex items-center">
+                                  {item.isAtomic ? <Activity size={16} className="text-purple-600 mr-2"/> : <Share2 size={16} className="text-blue-600 mr-2"/>}
+                                  <span className="font-semibold text-sm text-slate-700">{item.isAtomic ? 'Atomic ' : ''}Strong Count</span>
+                                </div>
+                                <div className="bg-white border-2 border-slate-800 text-slate-800 font-bold text-lg w-8 h-8 rounded-full flex items-center justify-center shadow-inner">{item.refs}</div>
+                              </div>
+                            )}
+                            <div className="text-center mt-2">
+                              <span className="text-xs text-slate-500 block mb-1 uppercase tracking-widest font-bold">儲存的值</span>
+                              <div className="font-mono text-xl text-slate-800 bg-white py-2 px-4 rounded-lg border border-black/5 inline-block shadow-sm">{item.val}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 主 App：頁籤導覽
+    // ─────────────────────────────────────────────────────────────────────────
+    const TABS = [
+      { id: 'borrow',   label: '借用檢查器與生命週期',      component: BorrowChecker },
+      { id: 'advanced', label: '借用檢查器進階視覺化',       component: AdvancedRustLifetimes },
+      { id: 'smart',    label: '智慧指標 Box / Rc / Arc', component: RustSmartPointers },
+    ];
+
+    function App() {
+      const [activeTab, setActiveTab] = useState(0);
+      const ActiveComponent = TABS[activeTab].component;
+
+      return (
+        <div>
+          {/* 頂部導覽列 */}
+          <nav className="sticky top-0 z-50 bg-white border-b border-slate-200 shadow-sm">
+            <div className="max-w-6xl mx-auto px-4 flex items-center h-14 gap-1">
+              <span className="font-bold text-slate-800 mr-4 text-lg shrink-0">🦀 Rust 視覺化</span>
+              {TABS.map((tab, idx) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(idx)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
+                    activeTab === idx
+                      ? 'bg-orange-600 text-white shadow'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          {/* 頁面內容 */}
+          <ActiveComponent />
+        </div>
+      );
+    }
+
+    createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
