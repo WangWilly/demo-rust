@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rust 借用檢查器與生命週期</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.27.1/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState } = React;
+
+    function SvgIcon({ size = 24, className = '', children, ...props }) {
+      return (
+        <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" strokeWidth="2"
+          strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+          {children}
+        </svg>
+      );
+    }
+    const Play          = (p) => <SvgIcon {...p}><polygon points="5 3 19 12 5 21 5 3"/></SvgIcon>;
+    const StepForward   = (p) => <SvgIcon {...p}><line x1="6" x2="6" y1="4" y2="20"/><polygon points="10 4 20 12 10 20 10 4"/></SvgIcon>;
+    const StepBack      = (p) => <SvgIcon {...p}><line x1="18" x2="18" y1="20" y2="4"/><polygon points="14 20 4 12 14 4 14 20"/></SvgIcon>;
+    const RotateCcw     = (p) => <SvgIcon {...p}><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></SvgIcon>;
+    const AlertTriangle = (p) => <SvgIcon {...p}><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></SvgIcon>;
+    const CheckCircle   = (p) => <SvgIcon {...p}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></SvgIcon>;
+
+    const SCENARIOS = [
+      {
+        id: 'invalid-borrow',
+        title: '情境一：懸空引用 (編譯失敗)',
+        description: '展示當引用的存活時間超過其指向的資料時，Rust 會如何阻擋編譯。',
+        code: [
+          "fn main() {",
+          "    let r;",
+          "    {",
+          "        let x = 5;",
+          "        r = &x;",
+          "    } // x 在此被丟棄",
+          "    println!(\"{}\", r);",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "程式開始執行。", memory: { outer: [], inner: null }, status: 'normal' },
+          { line: 1, message: "宣告變數 `r`。它的生命週期涵蓋整個 main 函式，但尚未被初始化。", memory: { outer: [{ name: 'r', val: '未初始化', state: 'active' }], inner: null }, status: 'normal' },
+          { line: 2, message: "開啟了一個新的內部作用域（Scope）。", memory: { outer: [{ name: 'r', val: '未初始化', state: 'active' }], inner: [] }, status: 'normal' },
+          { line: 3, message: "在內部作用域宣告 `x` 並賦值為 5。`x` 是這個數值的擁有者。", memory: { outer: [{ name: 'r', val: '未初始化', state: 'active' }], inner: [{ name: 'x', val: '5', state: 'active' }] }, status: 'normal' },
+          { line: 4, message: "借用發生！`r` 現在指向 `x`。Rust 的借用檢查器會記錄：r 的目標 (x) 必須活得比 r 還久。", memory: { outer: [{ name: 'r', val: '&x', state: 'active', pointsTo: 'x' }], inner: [{ name: 'x', val: '5', state: 'active' }] }, status: 'normal' },
+          { line: 5, message: "內部作用域結束。變數 `x` 被丟棄（Dropped）。此時 `r` 變成了懸空引用（指向無效記憶體）。", memory: { outer: [{ name: 'r', val: '&x', state: 'error', pointsTo: 'x' }], inner: [{ name: 'x', val: '已丟棄 (Dropped)', state: 'dropped' }] }, status: 'error', errorMsg: "`x` 不夠長壽 (x does not live long enough)" },
+          { line: 6, message: "編譯錯誤！嘗試使用無效的引用 `r`。借用檢查器在編譯階段就會擋下這段程式碼。", memory: { outer: [{ name: 'r', val: '&x', state: 'error', pointsTo: 'x' }], inner: [{ name: 'x', val: '已回收', state: 'dropped' }] }, status: 'error', errorMsg: "編譯失敗：borrowed value does not live long enough" }
+        ]
+      },
+      {
+        id: 'valid-borrow',
+        title: '情境二：合法的借用 (編譯成功)',
+        description: '展示資料的擁有者活得比引用還久的情境。',
+        code: [
+          "fn main() {",
+          "    let x = 5;",
+          "    let r = &x;",
+          "    println!(\"{}\", r);",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "程式開始執行。", memory: { outer: [], inner: null }, status: 'normal' },
+          { line: 1, message: "宣告變數 `x`，擁有數值 5。", memory: { outer: [{ name: 'x', val: '5', state: 'active' }], inner: null }, status: 'normal' },
+          { line: 2, message: "宣告引用 `r`，指向 `x`。因為它們在同一個作用域，`x` 會在 `r` 之後才被丟棄，這是安全的。", memory: { outer: [{ name: 'x', val: '5', state: 'active' }, { name: 'r', val: '&x', state: 'active', pointsTo: 'x' }], inner: null }, status: 'normal' },
+          { line: 3, message: "安全地印出 `r` 的值。此時 `x` 依然存活。", memory: { outer: [{ name: 'x', val: '5', state: 'active' }, { name: 'r', val: '&x', state: 'active', pointsTo: 'x' }], inner: null }, status: 'success' },
+          { line: 4, message: "程式結束，`r` 和 `x` 依序被安全地丟棄。", memory: { outer: [], inner: null }, status: 'success' }
+        ]
+      },
+      {
+        id: 'explicit-lifetime',
+        title: "情境三：顯式生命週期註記 'a",
+        description: "當函式回傳引用時，編譯器需要知道回傳的引用和哪個輸入參數有相同的生命週期。",
+        code: [
+          "fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {",
+          "    if x.len() > y.len() { x } else { y }",
+          "}",
+          "fn main() {",
+          "    let s1 = String::from(\"long\");",
+          "    let result;",
+          "    {",
+          "        let s2 = String::from(\"xyz\");",
+          "        result = longest(&s1, &s2);",
+          "    } // s2 被丟棄",
+          "    println!(\"{}\", result); // 錯誤！",
+          "}"
+        ],
+        steps: [
+          { line: 0, message: "標記 <'a> 告訴編譯器：回傳的字串引用，其生命週期將等於 x 和 y 兩者生命週期的「交集」（取較短的那個）。", memory: { outer: [], inner: null }, status: 'normal' },
+          { line: 4, message: "進入 main 函式。創建字串 `s1`。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}], inner: null }, status: 'normal' },
+          { line: 5, message: "宣告 `result` 準備接收最長的字串引用。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '未初始化', state: 'active'}], inner: null }, status: 'normal' },
+          { line: 6, message: "進入內部作用域。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '未初始化', state: 'active'}], inner: [] }, status: 'normal' },
+          { line: 7, message: "創建字串 `s2`。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '未初始化', state: 'active'}], inner: [{name: 's2', val: '"xyz"', state: 'active'}] }, status: 'normal' },
+          { line: 8, message: "呼叫 longest。根據 'a 規則，回傳值 result 的生命週期被限制為 s1 和 s2 兩者較短的那個，也就是 s2 的生命週期。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '&s1 或 &s2', state: 'active', pointsTo: 's2'}], inner: [{name: 's2', val: '"xyz"', state: 'active'}] }, status: 'normal' },
+          { line: 9, message: "內部作用域結束，`s2` 被丟棄。但 `result` 的生命週期 'a 已經和 `s2` 綁定了！", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '&s1 或 &s2', state: 'error', pointsTo: 's2'}], inner: [{name: 's2', val: '已丟棄', state: 'dropped'}] }, status: 'error', errorMsg: "`s2` does not live long enough" },
+          { line: 10, message: "嘗試印出 result 會導致編譯失敗，因為編譯器認為 result 可能指向已經死掉的 s2。", memory: { outer: [{name: 's1', val: '"long"', state: 'active'}, {name: 'result', val: '懸空引用', state: 'error'}], inner: [{name: 's2', val: '已丟棄', state: 'dropped'}] }, status: 'error', errorMsg: "編譯失敗！" }
+        ]
+      }
+    ];
+
+    function BorrowChecker() {
+      const [activeScenarioIdx, setActiveScenarioIdx] = useState(0);
+      const [currentStep, setCurrentStep] = useState(0);
+
+      const scenario = SCENARIOS[activeScenarioIdx];
+      const stepData = scenario.steps[currentStep];
+
+      const handleNext = () => { if (currentStep < scenario.steps.length - 1) setCurrentStep(currentStep + 1); };
+      const handlePrev = () => { if (currentStep > 0) setCurrentStep(currentStep - 1); };
+      const handleReset = () => { setCurrentStep(0); };
+      const handleScenarioChange = (idx) => { setActiveScenarioIdx(idx); setCurrentStep(0); };
+
+      const renderVar = (v, idx) => (
+        <div key={idx} className={`p-3 rounded-md mb-2 flex items-center justify-between border-2 transition-all ${
+          v.state === 'active' ? 'bg-blue-50 border-blue-200 text-blue-800' :
+          v.state === 'error' ? 'bg-red-50 border-red-400 text-red-800 animate-pulse' :
+          'bg-gray-100 border-gray-300 text-gray-500 opacity-60'
+        }`}>
+          <div className="flex flex-col">
+            <span className="font-mono font-bold text-lg">{v.name}</span>
+            <span className="text-sm">{v.state === 'active' && !v.pointsTo ? '擁有人 (Owner)' : (v.pointsTo ? '引用 (Reference)' : '已丟棄')}</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            {v.pointsTo && (
+              <div className="flex items-center text-gray-400">
+                <span className="mr-1">指向</span>
+                <span className={`font-mono font-bold ${v.state === 'error' ? 'text-red-500 line-through' : 'text-blue-600'}`}>{v.pointsTo}</span>
+              </div>
+            )}
+            <div className={`px-3 py-1 rounded font-mono text-sm ${v.state === 'error' ? 'bg-red-200' : 'bg-white shadow-sm'}`}>{v.val}</div>
+          </div>
+        </div>
+      );
+
+      return (
+        <div className="min-h-screen bg-gray-50 font-sans text-gray-800">
+          {/* 導覽列 */}
+          <nav className="sticky top-0 z-50 bg-white border-b border-slate-200 shadow-sm">
+            <div className="max-w-5xl mx-auto px-4 flex items-center h-14 gap-1">
+              <a href="index.html" className="font-bold text-slate-800 mr-4 text-lg shrink-0 hover:text-orange-600">🦀 Rust 視覺化</a>
+              <a href="rust01.html" className="px-4 py-2 rounded-lg text-sm font-medium bg-orange-600 text-white shadow">借用檢查器</a>
+              <a href="rust02.html" className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100">進階視覺化</a>
+              <a href="rust03.html" className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100">智慧指標</a>
+            </div>
+          </nav>
+
+          <div className="p-4 md:p-8">
+            <div className="max-w-5xl mx-auto space-y-6">
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+                <h1 className="text-3xl font-bold text-gray-900 mb-2">Rust 借用檢查器與生命週期</h1>
+                <p className="text-gray-600">透過視覺化單步執行，理解 Rust 是如何在編譯階段阻止懸空引用的。</p>
+                <div className="flex flex-wrap gap-2 mt-4">
+                  {SCENARIOS.map((s, idx) => (
+                    <button key={s.id} onClick={() => handleScenarioChange(idx)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeScenarioIdx === idx ? 'bg-orange-600 text-white shadow-md' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                      {s.title}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-4 text-sm text-gray-500 bg-gray-50 p-3 rounded border border-gray-100">{scenario.description}</p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="bg-[#1e1e1e] rounded-xl shadow-sm overflow-hidden border border-gray-800 flex flex-col">
+                  <div className="bg-[#2d2d2d] px-4 py-2 text-gray-300 text-sm font-mono flex items-center"><span>main.rs</span></div>
+                  <div className="p-4 font-mono text-sm sm:text-base overflow-x-auto flex-1">
+                    {scenario.code.map((line, idx) => (
+                      <div key={idx} className={`flex px-2 py-1 rounded transition-colors ${stepData.line === idx ? 'bg-blue-900/50 border-l-4 border-blue-400' : 'border-l-4 border-transparent text-gray-400'}`}>
+                        <span className="w-8 select-none opacity-50 text-right mr-4">{idx + 1}</span>
+                        <span className={stepData.line === idx ? 'text-blue-100' : ''}>{line.replace(/ /g, "\u00A0")}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="bg-[#2d2d2d] p-4 flex items-center justify-between border-t border-gray-700">
+                    <div className="text-gray-400 text-sm">Step {currentStep + 1} / {scenario.steps.length}</div>
+                    <div className="flex space-x-2">
+                      <button onClick={handleReset} className="p-2 rounded hover:bg-gray-600 text-gray-300 transition-colors" title="重置"><RotateCcw size={20} /></button>
+                      <button onClick={handlePrev} disabled={currentStep === 0} className="p-2 rounded hover:bg-gray-600 text-gray-300 disabled:opacity-30 transition-colors" title="上一步"><StepBack size={20} /></button>
+                      <button onClick={handleNext} disabled={currentStep === scenario.steps.length - 1} className="p-2 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 transition-colors flex items-center space-x-1">
+                        <span>下一步</span><StepForward size={20} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                  <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
+                    <h2 className="font-semibold text-gray-700">編譯器視角 (Borrow Checker)</h2>
+                  </div>
+                  <div className="p-5 flex-1 overflow-y-auto">
+                    <div className={`p-4 rounded-lg mb-6 border ${stepData.status === 'error' ? 'bg-red-50 border-red-200 text-red-800' : stepData.status === 'success' ? 'bg-green-50 border-green-200 text-green-800' : 'bg-blue-50 border-blue-200 text-blue-800'}`}>
+                      <div className="flex items-start">
+                        {stepData.status === 'error' ? <AlertTriangle className="mr-2 mt-0.5 shrink-0" size={20} /> : stepData.status === 'success' ? <CheckCircle className="mr-2 mt-0.5 shrink-0" size={20} /> : <Play className="mr-2 mt-0.5 shrink-0" size={20} />}
+                        <div>
+                          <p className="font-medium">{stepData.message}</p>
+                          {stepData.errorMsg && <p className="mt-2 font-mono text-sm bg-red-100 p-2 rounded text-red-900 border border-red-200">{stepData.errorMsg}</p>}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-4">
+                      <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">作用域與記憶體狀態</h3>
+                      <div className="border-2 border-gray-300 rounded-lg p-4 relative">
+                        <div className="absolute -top-3 left-4 bg-white px-2 text-xs font-bold text-gray-500">Main 作用域 ('a)</div>
+                        {stepData.memory.outer.length === 0 && !stepData.memory.inner && <div className="text-gray-400 text-center py-4 text-sm">尚未分配變數</div>}
+                        {stepData.memory.outer.map((v, i) => renderVar(v, i))}
+                        {stepData.memory.inner !== null && (
+                          <div className="border-2 border-dashed border-gray-400 bg-gray-50 rounded-lg p-4 mt-4 relative">
+                            <div className="absolute -top-3 left-4 bg-gray-50 px-2 text-xs font-bold text-gray-500">內部作用域 ('b)</div>
+                            {stepData.memory.inner.length === 0 && <div className="text-gray-400 text-center py-2 text-sm">無變數</div>}
+                            {stepData.memory.inner.map((v, i) => renderVar(v, i))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<BorrowChecker />);
+  </script>
+</body>
+</html>
